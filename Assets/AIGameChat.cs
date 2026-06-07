@@ -15,10 +15,15 @@ public class AIGameChat : MonoBehaviour
     public Button choiceButton1;
     public Button choiceButton2;
     public Button choiceButton3;
+    public Button choiceButton4;
 
     public TMP_Text choiceText1;
     public TMP_Text choiceText2;
     public TMP_Text choiceText3;
+    public TMP_Text choiceText4;
+
+    [Header("Game State")]
+    [SerializeField] private GameStateStore gameState;
 
     [Header("OpenAI")]
     [SerializeField] private string apiKey = "";
@@ -29,17 +34,33 @@ public class AIGameChat : MonoBehaviour
 
     private readonly List<ChatMessage> history = new();
 
-    private string[] currentChoices = new string[3];
+    private readonly string[] currentChoices = new string[4];
+    private bool isChoosingOpening;
 
-    private string instructions =
+    private readonly string storyInstructions =
         "Ти ведеш текстову пригодницьку гру українською мовою. " +
-        "Гравець має кожного ходу бачити короткий опис ситуації і рівно 3 варіанти дії. " +
+        "Пиши тільки короткий опис поточної сцени, без варіантів дій. " +
+        "Враховуй JSON стану гри, але не показуй його як службові дані. " +
+        "Не пиши приховані міркування.";
+
+    private readonly string choiceInstructions =
+        "Ти генеруєш рівно 4 варіанти дії для текстової пригодницької гри українською. " +
+        "Варіанти мають бути короткі, різні за наміром і прив'язані до поточної сцени. " +
         "Не пиши приховані міркування. " +
-        "Відповідай строго у такому форматі:\n" +
-        "STORY: текст сцени\n" +
+        "Відповідай строго у форматі:\n" +
         "CHOICE_1: перший варіант\n" +
         "CHOICE_2: другий варіант\n" +
-        "CHOICE_3: третій варіант";
+        "CHOICE_3: третій варіант\n" +
+        "CHOICE_4: четвертий варіант";
+
+    private readonly string effectInstructions =
+        "Ти перевіряєш, чи подія в текстовій пригоді змінює стан гри. " +
+        "Стан гри зберігається як словник key/value у JSON. " +
+        "Основні ключі: location, time, hit_points, mana_points, stamina_points, strength, agility, intelligence. " +
+        "Можна додавати нові характеристики, якщо вони справді потрібні сцені. " +
+        "Якщо змін немає, поверни порожній масив changes. " +
+        "Відповідай тільки валідним JSON без Markdown у форматі: " +
+        "{\"changes\":[{\"key\":\"location\",\"value\":\"Нова локація\"}],\"summary\":\"коротко\"}";
 
     [Serializable]
     public class ChatMessage
@@ -83,11 +104,34 @@ public class AIGameChat : MonoBehaviour
         public string text;
     }
 
+    [Serializable]
+    public class EffectResponse
+    {
+        public GameStateStore.StateEntry[] changes;
+        public string summary;
+    }
+
+    private void Awake()
+    {
+        if (gameState == null)
+        {
+            gameState = GetComponent<GameStateStore>();
+        }
+
+        if (gameState == null)
+        {
+            gameState = gameObject.AddComponent<GameStateStore>();
+        }
+
+        AutoBindMissingChoices();
+    }
+
     private void Start()
     {
-        choiceButton1.onClick.AddListener(() => Choose(0));
-        choiceButton2.onClick.AddListener(() => Choose(1));
-        choiceButton3.onClick.AddListener(() => Choose(2));
+        AddChoiceListener(choiceButton1, 0);
+        AddChoiceListener(choiceButton2, 1);
+        AddChoiceListener(choiceButton3, 2);
+        AddChoiceListener(choiceButton4, 3);
 
         StartNewGame();
     }
@@ -95,43 +139,115 @@ public class AIGameChat : MonoBehaviour
     public void StartNewGame()
     {
         history.Clear();
+        isChoosingOpening = true;
 
-        SetButtonsInteractable(false);
+        storyText.text =
+            "Обери початок фентезі RPG:\n\n" +
+            "1. Ліс прокидається і шепоче твоє ім'я.\n" +
+            "2. У місті магів зникає останній кристал світла.\n" +
+            "3. Караван знаходить карту до підземного королівства.\n" +
+            "4. Дракон просить допомоги у людини.";
 
-        string startPrompt =
-            "Почни нову пригодницьку гру. Жанр: фентезі. " +
-            "Гравець прокидається у незнайомому місці. " +
-            "Згенеруй першу сцену і 3 варіанти ходу.";
-
-        StartCoroutine(SendToAI(startPrompt));
+        SetChoice(0, "Пробудження у зачарованому лісі");
+        SetChoice(1, "Розслідування у місті магів");
+        SetChoice(2, "Похід у підземне королівство");
+        SetChoice(3, "Союз із пораненим драконом");
+        SetButtonsInteractable(true);
     }
 
     private void Choose(int choiceIndex)
     {
+        if (choiceIndex < 0 || choiceIndex >= currentChoices.Length)
+        {
+            return;
+        }
+
         string selectedChoice = currentChoices[choiceIndex];
+        if (string.IsNullOrWhiteSpace(selectedChoice))
+        {
+            return;
+        }
 
         SetButtonsInteractable(false);
 
-        string prompt =
-            "Гравець обрав дію: " + selectedChoice + "\n" +
-            "Продовж історію з наслідками цього вибору. " +
-            "Згенеруй нову сцену і рівно 3 нові варіанти ходу.";
+        string prompt;
+        if (isChoosingOpening)
+        {
+            isChoosingOpening = false;
+            history.Clear();
+            prompt =
+                "Почни нову фентезі RPG з такого старту: " + selectedChoice + "\n" +
+                "Дай першу сцену, де гравець уже може діяти.\n" +
+                "Поточний стан гри: " + gameState.ToJson();
+        }
+        else
+        {
+            prompt =
+                "Гравець обрав дію: " + selectedChoice + "\n" +
+                "Продовж історію з наслідками цього вибору.\n" +
+                "Поточний стан гри: " + gameState.ToJson();
+        }
 
-        StartCoroutine(SendToAI(prompt));
+        StartCoroutine(RunTurn(prompt, selectedChoice));
     }
 
-    private IEnumerator SendToAI(string userText)
+    private IEnumerator RunTurn(string userText, string selectedChoice)
     {
-        storyText.text = "Генерація...";
+        storyText.text = "Генерація історії...";
 
         history.Add(new ChatMessage("user", userText));
         TrimHistory();
 
+        string story = "";
+        yield return SendToAI(history, storyInstructions, text => story = text);
+
+        if (string.IsNullOrWhiteSpace(story))
+        {
+            storyText.text = "AI повернув порожню історію.";
+            SetButtonsInteractable(true);
+            yield break;
+        }
+
+        history.Add(new ChatMessage("assistant", story));
+        TrimHistory();
+
+        storyText.text = "Генерація варіантів...";
+
+        List<ChatMessage> choiceInput = new()
+        {
+            new ChatMessage("user",
+                "Сцена:\n" + story + "\n\nПоточний стан гри:\n" + gameState.ToJson())
+        };
+
+        string choiceText = "";
+        yield return SendToAI(choiceInput, choiceInstructions, text => choiceText = text);
+        ApplyChoices(choiceText);
+
+        storyText.text = "Перевірка змін стану...";
+
+        List<ChatMessage> effectInput = new()
+        {
+            new ChatMessage("user",
+                "Попередній вибір гравця: " + selectedChoice + "\n\n" +
+                "Нова сцена:\n" + story + "\n\n" +
+                "Поточний стан гри:\n" + gameState.ToJson())
+        };
+
+        string effectJson = "";
+        yield return SendToAI(effectInput, effectInstructions, text => effectJson = text);
+        ApplyStateEffects(effectJson);
+
+        storyText.text = story.Trim();
+        SetButtonsInteractable(true);
+    }
+
+    private IEnumerator SendToAI(List<ChatMessage> input, string instructions, Action<string> onSuccess)
+    {
         var requestBody = new ResponseRequest
         {
             model = model,
             instructions = instructions,
-            input = history
+            input = input
         };
 
         string json = JsonUtility.ToJson(requestBody);
@@ -152,12 +268,7 @@ public class AIGameChat : MonoBehaviour
             yield break;
         }
 
-        string aiText = ExtractAnswer(request.downloadHandler.text);
-
-        history.Add(new ChatMessage("assistant", aiText));
-        TrimHistory();
-
-        ApplyAIResponse(aiText);
+        onSuccess?.Invoke(ExtractAnswer(request.downloadHandler.text));
     }
 
     private string ExtractAnswer(string json)
@@ -188,31 +299,41 @@ public class AIGameChat : MonoBehaviour
         }
     }
 
-    private void ApplyAIResponse(string text)
+    private void ApplyChoices(string text)
     {
-        string story = GetValue(text, "STORY:", "CHOICE_1:");
         string choice1 = GetValue(text, "CHOICE_1:", "CHOICE_2:");
         string choice2 = GetValue(text, "CHOICE_2:", "CHOICE_3:");
-        string choice3 = GetValue(text, "CHOICE_3:", null);
-
-        if (string.IsNullOrWhiteSpace(story))
-            story = text;
+        string choice3 = GetValue(text, "CHOICE_3:", "CHOICE_4:");
+        string choice4 = GetValue(text, "CHOICE_4:", null);
 
         if (string.IsNullOrWhiteSpace(choice1)) choice1 = "Оглянутися";
         if (string.IsNullOrWhiteSpace(choice2)) choice2 = "Піти вперед";
         if (string.IsNullOrWhiteSpace(choice3)) choice3 = "Зачекати";
+        if (string.IsNullOrWhiteSpace(choice4)) choice4 = "Поговорити";
 
-        storyText.text = story.Trim();
+        SetChoice(0, choice1.Trim());
+        SetChoice(1, choice2.Trim());
+        SetChoice(2, choice3.Trim());
+        SetChoice(3, choice4.Trim());
+    }
 
-        currentChoices[0] = choice1.Trim();
-        currentChoices[1] = choice2.Trim();
-        currentChoices[2] = choice3.Trim();
+    private void ApplyStateEffects(string text)
+    {
+        string json = ExtractJsonObject(text);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return;
+        }
 
-        choiceText1.text = currentChoices[0];
-        choiceText2.text = currentChoices[1];
-        choiceText3.text = currentChoices[2];
-
-        SetButtonsInteractable(true);
+        try
+        {
+            EffectResponse effect = JsonUtility.FromJson<EffectResponse>(json);
+            gameState.ApplyChanges(effect?.changes);
+        }
+        catch
+        {
+            Debug.LogWarning("Не вдалося прочитати JSON змін стану: " + text);
+        }
     }
 
     private string GetValue(string source, string startMarker, string endMarker)
@@ -239,9 +360,10 @@ public class AIGameChat : MonoBehaviour
 
     private void SetButtonsInteractable(bool value)
     {
-        choiceButton1.interactable = value;
-        choiceButton2.interactable = value;
-        choiceButton3.interactable = value;
+        SetButtonInteractable(choiceButton1, value);
+        SetButtonInteractable(choiceButton2, value);
+        SetButtonInteractable(choiceButton3, value);
+        SetButtonInteractable(choiceButton4, value);
     }
 
     private void TrimHistory()
@@ -263,5 +385,93 @@ public class AIGameChat : MonoBehaviour
         }
 
         return Mathf.CeilToInt(chars / 4f);
+    }
+
+    private string ExtractJsonObject(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "";
+        }
+
+        int start = text.IndexOf('{');
+        int end = text.LastIndexOf('}');
+
+        if (start == -1 || end == -1 || end <= start)
+        {
+            return "";
+        }
+
+        return text.Substring(start, end - start + 1);
+    }
+
+    private void AddChoiceListener(Button button, int choiceIndex)
+    {
+        if (button != null)
+        {
+            button.onClick.AddListener(() => Choose(choiceIndex));
+        }
+    }
+
+    private void SetButtonInteractable(Button button, bool value)
+    {
+        if (button != null)
+        {
+            button.interactable = value;
+        }
+    }
+
+    private void SetChoice(int index, string text)
+    {
+        if (index < 0 || index >= currentChoices.Length)
+        {
+            return;
+        }
+
+        currentChoices[index] = text;
+        TMP_Text label = GetChoiceText(index);
+        if (label != null)
+        {
+            label.text = text;
+        }
+    }
+
+    private TMP_Text GetChoiceText(int index)
+    {
+        return index switch
+        {
+            0 => choiceText1,
+            1 => choiceText2,
+            2 => choiceText3,
+            3 => choiceText4,
+            _ => null
+        };
+    }
+
+    private void AutoBindMissingChoices()
+    {
+        BindChoiceIfMissing("Choose_1", ref choiceButton1, ref choiceText1);
+        BindChoiceIfMissing("Choose_2", ref choiceButton2, ref choiceText2);
+        BindChoiceIfMissing("Choose_3", ref choiceButton3, ref choiceText3);
+        BindChoiceIfMissing("Choose_4", ref choiceButton4, ref choiceText4);
+    }
+
+    private void BindChoiceIfMissing(string objectName, ref Button button, ref TMP_Text label)
+    {
+        GameObject found = GameObject.Find(objectName);
+        if (found == null)
+        {
+            return;
+        }
+
+        if (button == null)
+        {
+            button = found.GetComponent<Button>();
+        }
+
+        if (label == null)
+        {
+            label = found.GetComponentInChildren<TMP_Text>();
+        }
     }
 }

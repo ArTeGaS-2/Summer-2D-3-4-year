@@ -32,3 +32,5 @@ sysinfo.txt
 # OS files
 .DS_Store
 Thumbs.db
+__MACOSX/
+__MACOSX.meta
